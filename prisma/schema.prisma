@@ -1,0 +1,71 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum VideoStatus {
+  UPLOADING
+  PROCESSING
+  SUCCESS
+  FAILED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  folders      Folder[]
+  videos       Video[]
+}
+
+model Folder {
+  id        String    @id @default(cuid())
+  userId    String
+  name      String
+  parentId  String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent    Folder?   @relation("FolderChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children  Folder[]  @relation("FolderChildren")
+  videos    Video[]
+
+  @@index([userId, parentId])
+}
+
+model Video {
+  id                    String      @id @default(cuid())
+  userId                String
+  folderId              String?
+  title                 String
+  originalFileName      String
+  mimeType              String
+  sizeBytes             Int
+  status                VideoStatus @default(UPLOADING)
+  bunnyLibraryId        Int
+  bunnyVideoId          String?     @unique
+  bunnyVideoStatus      Int?
+  bunnyEncodeProgress   Int?        @default(0)
+  playbackUrl           String?
+  embedUrl              String?
+  thumbnailUrl          String?
+  errorMessage          String?
+  uploadedAt            DateTime?
+  processingStartedAt   DateTime?
+  processedAt           DateTime?
+  failedAt              DateTime?
+  lastSyncedAt          DateTime?
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  folder Folder? @relation(fields: [folderId], references: [id], onDelete: Cascade)
+
+  @@index([userId, folderId])
+  @@index([userId, status])
+}
