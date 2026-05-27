@@ -98,7 +98,7 @@ export async function uploadBunnyVideo(videoId: string, buffer: Buffer, options:
     return fetch(url, {
       method: 'PUT',
       headers: accessKeyHeaders('application/octet-stream'),
-      body: buffer
+      body: new Uint8Array(buffer)
     });
   }
 
