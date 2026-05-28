@@ -13,6 +13,12 @@ import { buildEmbedUrl, createBunnyVideo, createTusUploadCredentials, getBunnyPl
 import { createFolder, createVideoRecord, getFolderContents, getFolderTree, getVideoById, ensureOwnsFolder, listPendingVideos, updateVideo } from './services/drive.js';
 import { rootFolderId, safeTrim } from './utils.js';
 
+function isDbConnectionError(err: unknown) {
+  const msg = err instanceof Error ? err.message : String(err);
+  // Prisma P1001 or generic "Can't reach database" messages
+  return msg.includes('P1001') || msg.includes("Can't reach database") || msg.includes('PrismaClientInitializationError');
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -47,12 +53,22 @@ app.post('/api/bunny/webhook', express.raw({ type: 'application/json' }), async 
     Status: number;
   };
 
-  const video = await prisma.video.findFirst({
-    where: {
-      bunnyVideoId: payload.VideoGuid,
-      bunnyLibraryId: payload.VideoLibraryId
+  let video;
+  try {
+    video = await prisma.video.findFirst({
+      where: {
+        bunnyVideoId: payload.VideoGuid,
+        bunnyLibraryId: payload.VideoLibraryId
+      }
+    });
+  } catch (err) {
+    if (isDbConnectionError(err)) {
+      console.error('DB unavailable for webhook:', err instanceof Error ? err.message : err);
+      response.status(503).json({ error: 'Database unavailable' });
+      return;
     }
-  });
+    throw err;
+  }
 
   if (!video) {
     response.status(200).json({ ok: true });
@@ -105,22 +121,32 @@ app.post('/api/auth/signup', async (request, response) => {
     return;
   }
 
-  const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
-  if (existing) {
-    response.status(409).json({ error: 'Email already exists' });
+  try {
+    const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    if (existing) {
+      response.status(409).json({ error: 'Email already exists' });
+      return;
+    }
+
+    const user = await prisma.user.create({
+      data: {
+        email: normalizedEmail,
+        passwordHash: await hashPassword(password)
+      }
+    });
+
+    const token = signSession({ userId: user.id, email: user.email });
+    setSessionCookie(response, token);
+    response.status(201).json({ user: { id: user.id, email: user.email, createdAt: user.createdAt.toISOString() } });
+    return;
+  } catch (err) {
+    if (isDbConnectionError(err)) {
+      response.status(503).json({ error: 'Database unavailable' });
+      return;
+    }
+    response.status(500).json({ error: err instanceof Error ? err.message : 'Unable to create user' });
     return;
   }
-
-  const user = await prisma.user.create({
-    data: {
-      email: normalizedEmail,
-      passwordHash: await hashPassword(password)
-    }
-  });
-
-  const token = signSession({ userId: user.id, email: user.email });
-  setSessionCookie(response, token);
-  response.status(201).json({ user: { id: user.id, email: user.email, createdAt: user.createdAt.toISOString() } });
 });
 
 app.post('/api/auth/signin', async (request, response) => {
@@ -132,29 +158,49 @@ app.post('/api/auth/signin', async (request, response) => {
     return;
   }
 
-  const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
-  if (!user || !(await verifyPassword(password, user.passwordHash))) {
-    response.status(401).json({ error: 'Invalid credentials' });
+  try {
+    const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    if (!user || !(await verifyPassword(password, user.passwordHash))) {
+      response.status(401).json({ error: 'Invalid credentials' });
+      return;
+    }
+
+    const token = signSession({ userId: user.id, email: user.email });
+    setSessionCookie(response, token);
+    response.json({ user: { id: user.id, email: user.email, createdAt: user.createdAt.toISOString() } });
+    return;
+  } catch (err) {
+    if (isDbConnectionError(err)) {
+      response.status(503).json({ error: 'Database unavailable' });
+      return;
+    }
+    response.status(500).json({ error: err instanceof Error ? err.message : 'Unable to sign in' });
     return;
   }
-
-  const token = signSession({ userId: user.id, email: user.email });
-  setSessionCookie(response, token);
-  response.json({ user: { id: user.id, email: user.email, createdAt: user.createdAt.toISOString() } });
 });
 
 app.get('/api/auth/me', requireUser, async (request, response) => {
-  const user = await prisma.user.findUnique({
-    where: { id: request.user!.id },
-    select: { id: true, email: true, createdAt: true }
-  });
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: request.user!.id },
+      select: { id: true, email: true, createdAt: true }
+    });
 
-  if (!user) {
-    response.status(404).json({ error: 'User not found' });
+    if (!user) {
+      response.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    response.json({ user: { ...user, createdAt: user.createdAt.toISOString() } });
+    return;
+  } catch (err) {
+    if (isDbConnectionError(err)) {
+      response.status(503).json({ error: 'Database unavailable' });
+      return;
+    }
+    response.status(500).json({ error: err instanceof Error ? err.message : 'Unable to fetch user' });
     return;
   }
-
-  response.json({ user: { ...user, createdAt: user.createdAt.toISOString() } });
 });
 
 app.post('/api/auth/logout', (_request, response) => {
@@ -322,8 +368,24 @@ app.get('/api/videos/:videoId/play', requireUser, async (request, response) => {
     return;
   }
 
-  const embedUrl = video.embedUrl ?? buildEmbedUrl(video.bunnyVideoId);
-  const playbackUrl = video.playbackUrl ?? embedUrl;
+  // If DB doesn't yet have play URLs (webhook/poller missed), ask Bunny for live play data.
+  let embedUrl = video.embedUrl ?? buildEmbedUrl(video.bunnyVideoId);
+  let playbackUrl = video.playbackUrl ?? embedUrl;
+  try {
+    const playData = await getBunnyPlayData(video.bunnyVideoId);
+    playbackUrl = playData.videoPlaylistUrl ?? playData.fallbackUrl ?? playbackUrl;
+    embedUrl = buildEmbedUrl(video.bunnyVideoId);
+
+    // Best-effort: update DB so future requests use stored URLs.
+    try {
+      await prisma.video.update({ where: { id: video.id }, data: { playbackUrl, embedUrl, thumbnailUrl: playData.thumbnailUrl ?? playData.previewUrl ?? video.thumbnailUrl ?? null, lastSyncedAt: new Date() } });
+    } catch {
+      // ignore DB update failures here
+    }
+  } catch (err) {
+    // If Bunny play API failed, continue with embed/playback fallbacks
+    console.error('Failed to fetch Bunny play data:', err instanceof Error ? err.message : err);
+  }
 
   response.json({
     video: serializeVideo(video),
@@ -389,6 +451,11 @@ app.get('/api/content', requireUser, async (request, response) => {
   } catch {
     response.status(404).json({ error: 'Folder not found' });
   }
+});
+
+app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+  const message = error instanceof Error ? error.message : 'Internal server error';
+  response.status(500).json({ error: message });
 });
 
 const clientDist = path.resolve(projectRoot, 'frontend', 'dist');
