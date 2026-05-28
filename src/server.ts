@@ -7,9 +7,16 @@ const server = app.listen(env.PORT, () => {
   console.log(`Drive app listening on http://localhost:${env.PORT}`);
 });
 
-const syncTimer = setInterval(() => {
-  void runBunnyPollingSync();
-}, 90_000);
+// Background polling can spam logs when the DB is unreachable.
+// Allow disabling via `DISABLE_POLLING=true` in env for debugging.
+let syncTimer: NodeJS.Timeout | null = null;
+if (process.env.DISABLE_POLLING !== 'true') {
+  syncTimer = setInterval(() => {
+    void runBunnyPollingSync().catch((error) => {
+      console.error('Bunny polling sync failed:', error);
+    });
+  }, 90_000);
+}
 
 process.on('SIGTERM', async () => {
   clearInterval(syncTimer);
