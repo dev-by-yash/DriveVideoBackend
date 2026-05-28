@@ -9,7 +9,7 @@ const server = app.listen(env.PORT, () => {
 
 // Background polling can spam logs when the DB is unreachable.
 // Allow disabling via `DISABLE_POLLING=true` in env for debugging.
-let syncTimer: NodeJS.Timeout | null = null;
+let syncTimer: ReturnType<typeof setInterval> | undefined;
 if (process.env.DISABLE_POLLING !== 'true') {
   syncTimer = setInterval(() => {
     void runBunnyPollingSync().catch((error) => {
@@ -19,13 +19,17 @@ if (process.env.DISABLE_POLLING !== 'true') {
 }
 
 process.on('SIGTERM', async () => {
-  clearInterval(syncTimer);
+  if (syncTimer) {
+    clearInterval(syncTimer);
+  }
   server.close();
   await prisma.$disconnect();
 });
 
 process.on('SIGINT', async () => {
-  clearInterval(syncTimer);
+  if (syncTimer) {
+    clearInterval(syncTimer);
+  }
   server.close();
   await prisma.$disconnect();
 });
