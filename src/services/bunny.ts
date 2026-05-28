@@ -54,7 +54,9 @@ function readOnlyHeaders(contentType = 'application/json') {
 }
 
 export function buildEmbedUrl(videoId: string) {
-  return `${env.BUNNY_PLAYER_BASE_URL.replace(/\/$/, '')}/${env.BUNNY_STREAM_LIBRARY_ID}/${videoId}`;
+  const lib = String(env.BUNNY_STREAM_LIBRARY_ID).replace(/[^0-9]/g, '');
+  const safeId = String(videoId).replace(/["'\\\s]/g, '').trim();
+  return `${env.BUNNY_PLAYER_BASE_URL.replace(/\/$/, '')}/${lib}/${safeId}`;
 }
 
 export async function createBunnyVideo(title: string) {
@@ -98,7 +100,7 @@ export async function uploadBunnyVideo(videoId: string, buffer: Buffer, options:
     return fetch(url, {
       method: 'PUT',
       headers: accessKeyHeaders('application/octet-stream'),
-      body: new Uint8Array(buffer)
+      body: buffer
     });
   }
 
